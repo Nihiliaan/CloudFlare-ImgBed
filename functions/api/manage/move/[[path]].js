@@ -186,6 +186,17 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
         await db.put(newFileId, img.value, { metadata: img.metadata });
         await db.delete(fileId);
 
+        // 维护历史路径重定向与短链别名，防止外部引用链接失效 (Issue #763)
+        try {
+            await db.put('manage@redirect@' + fileId, newFileId);
+            const baseName = newFileId.split('/').pop();
+            if (baseName) {
+                await db.put('manage@alias@' + baseName, newFileId);
+            }
+        } catch (aliasErr) {
+            console.error('Failed to update move redirect pointer:', aliasErr);
+        }
+
         // 清除CDN缓存
         await purgeCFCache(env, cdnUrl);
 

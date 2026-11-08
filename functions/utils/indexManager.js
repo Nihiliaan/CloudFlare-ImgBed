@@ -683,13 +683,17 @@ export async function readIndex(context, options = {}) {
             };
         }
 
-        // 分页处理
-        const totalCount = filteredFiles.length;
+        // 过滤掉内部目录标记对象（.keep）
+        const isNotMarker = file => !file.id.endsWith('/.keep') && file.metadata?.IsDirectoryMarker !== true && file.metadata?.Channel !== 'Redirect';
+        const nonMarkerFilteredFiles = filteredFiles.filter(isNotMarker);
 
-        let resultFiles = filteredFiles;
+        // 分页处理
+        const totalCount = nonMarkerFilteredFiles.length;
+
+        let resultFiles = nonMarkerFilteredFiles;
 
         // 计算当前目录下的直接文件（不包含子目录文件）
-        const directFiles = filteredFiles.filter(file => {
+        const directFiles = nonMarkerFilteredFiles.filter(file => {
             const fileDir = file.metadata.Directory ? file.metadata.Directory : extractDirectory(file.id);
             return fileDir === dirPrefix;
         });

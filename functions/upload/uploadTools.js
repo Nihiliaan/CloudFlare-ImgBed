@@ -387,6 +387,17 @@ export async function endUpload(context, fileId, metadata) {
     // 更新文件索引（索引更新时会自动计算容量统计）
     await addFileToIndex(context, fileId, metadata);
 
+    // 建立短链/无路径别名映射，支持通过独立文件名无路径直接访问 (Issue #763)
+    const baseName = fileId.split('/').pop();
+    if (baseName) {
+        try {
+            const db = getDatabase(env);
+            await db.put('manage@alias@' + baseName, fileId);
+        } catch (e) {
+            console.error('Failed to save alias for', fileId, e);
+        }
+    }
+
     // 自动标签属于上传后的后台增强任务，任何失败都不得改变上传结果。
     await autoTagUploadedFile(context, fileId, metadata);
 }

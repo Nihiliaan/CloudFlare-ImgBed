@@ -170,6 +170,17 @@ export async function onRequest(context) {
         await db.put(newFileId, fileData.value, { metadata });
         await db.delete(fileId);
 
+        // 维护历史路径重定向与短链别名，防止外部引用链接失效 (Issue #763)
+        try {
+            await db.put('manage@redirect@' + fileId, newFileId);
+            const baseName = newFileId.split('/').pop();
+            if (baseName) {
+                await db.put('manage@alias@' + baseName, newFileId);
+            }
+        } catch (aliasErr) {
+            console.error('Failed to update rename redirect pointer:', aliasErr);
+        }
+
         // 清除 CDN 缓存
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
         await purgeCFCache(env, cdnUrl);

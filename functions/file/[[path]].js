@@ -10,6 +10,7 @@ import {
     returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
+import { readIndex } from '../utils/indexManager.js';
 import { normalizeFileType } from '../utils/mimeTypes.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
 import {
@@ -76,7 +77,20 @@ export async function onRequest(context) {  // Contents of context object
 
     // 从数据库中获取图片记录
     const db = getDatabase(env);
-    const imgRecord = await db.getWithMetadata(fileId);
+    let imgRecord = await db.getWithMetadata(fileId);
+
+    // 如果未直接命中记录，尝试解析历史重定向指针或基础文件名别名（移动防断链与无路径短链访问）
+    if (!imgRecord || !imgRecord.metadata) {
+        const resolvedId = await resolveFileAlias(context, db, fileId);
+        if (resolvedId && resolvedId !== fileId) {
+            if (url.searchParams.get('redirect') === 'true') {
+                return Response.redirect(`${url.origin}/file/${resolvedId}`, 302);
+            }
+            fileId = resolvedId;
+            imgRecord = await db.getWithMetadata(fileId);
+        }
+    }
+
     if (!imgRecord) {
         return new Response('Error: Image Not Found', { status: 404 });
     }
@@ -1159,4 +1173,75 @@ function getWebDAVPublicFileUrl(webdavCredentials, filePath) {
     }
 
     return '';
+}
+
+
+export async function resolveFileAlias(context, db, fileId) {
+    if (!fileId || typeof fileId !== 'string') return null;
+
+    // 1. 检查精确路径重定向指针（移动或重命名历史指针，支持多跳）
+    let currentId = fileId;
+    let hops = 0;
+    while (currentId && hops < 5) {
+        try {
+            const redirectTarget = await db.get('manage@redirect@' + currentId);
+            if (redirectTarget && redirectTarget !== currentId) {
+                currentId = redirectTarget;
+                hops++;
+                continue;
+            }
+        } catch (e) {
+            break;
+        }
+        break;
+    }
+    if (hops > 0) {
+        return currentId;
+    }
+
+    // 2. 检查文件名别名映射 manage@alias@{baseName}
+    const baseName = fileId.split('/').pop();
+    if (!baseName) return null;
+
+    try {
+        const aliasTarget = await db.get('manage@alias@' + baseName);
+        if (aliasTarget) {
+            return aliasTarget;
+        }
+    } catch (e) {}
+
+    // 3. 检查 D1 数据库（若配置）
+    if (context.env?.img_d1 && typeof context.env.img_d1.prepare === 'function') {
+        try {
+            const stmt = context.env.img_d1.prepare(
+                'SELECT id FROM files WHERE id = ? OR id LIKE ? LIMIT 1'
+            );
+            const row = await stmt.bind(baseName, '%/' + baseName).first();
+            if (row && row.id) {
+                try {
+                    await db.put('manage@alias@' + baseName, row.id);
+                } catch (e) {}
+                return row.id;
+            }
+        } catch (e) {}
+    }
+
+    // 4. 从索引倒查（KV 或通用环境）
+    try {
+        if (typeof readIndex === 'function') {
+            const indexResult = await readIndex(context, { count: -1, includeSubdirFiles: true });
+            if (indexResult && Array.isArray(indexResult.files)) {
+                const matched = indexResult.files.find(f => f.id === baseName || f.id.endsWith('/' + baseName) || f.name === baseName || (typeof f.name === 'string' && f.name.endsWith('/' + baseName)));
+                if (matched) {
+                    const targetId = matched.id || matched.name;
+                    try {
+                        await db.put('manage@alias@' + baseName, targetId);
+                    } catch (e) {}
+                    return targetId;
+                }
+            }
+        }
+    } catch (e) {}
+
+    return null;
 }

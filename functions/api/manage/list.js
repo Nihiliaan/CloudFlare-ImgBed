@@ -181,10 +181,10 @@ export async function onRequest(context) {
         const db = getDatabase(context.env);
         const metadataViewContext = await createMetadataViewContext(db, context.env);
 
-        // 转换文件格式
-        const compatibleFiles = await Promise.all(
+        // 转换文件格式并过滤内部目录标记与重定向指针
+        const compatibleFiles = (await Promise.all(
             result.files.map(file => serializeFileRecordForManagement(db, context.env, file, metadataViewContext))
-        );
+        )).filter(file => !file.name.endsWith('/.keep') && file.metadata?.IsDirectoryMarker !== true && file.metadata?.Channel !== 'Redirect');
 
         return new Response(JSON.stringify({
             files: compatibleFiles,
@@ -237,6 +237,18 @@ async function getAllFileRecords(env, dir) {
             for (const item of response.keys) {
                 // 跳过管理相关的键
                 if (item.name.startsWith('manage@') || item.name.startsWith('chunk_')) {
+                    continue;
+                }
+
+                // 提取目录信息（包含空目录标记）
+                const subDir = item.name.substring(dir.length);
+                const firstSlashIndex = subDir.indexOf('/');
+                if (firstSlashIndex !== -1) {
+                    directories.add(dir + subDir.substring(0, firstSlashIndex));
+                }
+
+                // 跳过目录标记和重定向别名指针
+                if (item.name.endsWith('/.keep') || item.metadata?.IsDirectoryMarker === true || item.metadata?.Channel === 'Redirect') {
                     continue;
                 }
 

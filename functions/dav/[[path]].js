@@ -28,7 +28,7 @@ export async function onRequest(context) {
         case 'DELETE': return handleDelete(modifiedRequest, env);
         case 'GET': return handleGet(modifiedRequest, env);
         case 'MOVE': return handleMove(modifiedRequest, env, context);
-        case 'MKCOL': return new Response(null, { status: 201 });
+        case 'MKCOL': return handleMkcol(modifiedRequest, env, context);
         default: return new Response('Method Not Allowed', { status: 405 });
     }
 }
@@ -476,7 +476,7 @@ async function fetchDirectoryContents(dir, env, request) {
         throw new Error(`API error: ${result.error} - ${result.message}`);
     }
 
-    if (result.files && result.files.length > 0) allFiles = allFiles.concat(result.files);
+    if (result.files && result.files.length > 0) allFiles = allFiles.concat(result.files.filter(f => !f.name.endsWith('/.keep')));
     if (result.directories && result.directories.length > 0) allDirectories = allDirectories.concat(result.directories);
 
 
@@ -558,4 +558,38 @@ function createFileXml(file) {
     const lastModified = fileTime.toUTCString();
     const contentType = normalizeFileType(file.metadata?.FileType) || 'application/octet-stream';
     return `<D:response><D:href>${encodeURI(`/dav/${file.name}`)}</D:href><D:propstat><D:prop><D:displayname>${file.name.split('/').pop()}</D:displayname><D:resourcetype/><D:creationdate>${creationDate}</D:creationdate><D:getlastmodified>${lastModified}</D:getlastmodified><D:getcontentlength>${fileSize}</D:getcontentlength><D:getcontenttype>${contentType}</D:getcontenttype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
+}
+
+
+async function handleMkcol(request, env, context) {
+    const path = decodeURIComponent(new URL(request.url).pathname);
+    const cleanDir = path.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!cleanDir) {
+        return new Response('Invalid directory name', { status: 400 });
+    }
+
+    const { sanitizeUploadFolder } = await import('../upload/uploadTools.js');
+    const sanitizedDir = sanitizeUploadFolder(cleanDir);
+    const markerId = `${sanitizedDir}/.keep`;
+    const db = getDatabase(env);
+    const metadata = {
+        Channel: 'CloudflareR2',
+        FileName: '.keep',
+        FileType: 'application/octet-stream',
+        FileSizeBytes: 0,
+        Directory: `${sanitizedDir}/`,
+        IsDirectoryMarker: true,
+        TimeStamp: Date.now()
+    };
+    await db.put(markerId, '', { metadata });
+    if (env.img_r2) {
+        await env.img_r2.put(markerId, new Uint8Array(0));
+    }
+    const { addFileToIndex } = await import('../utils/indexManager.js');
+    if (context.waitUntil) {
+        context.waitUntil(addFileToIndex(context, markerId, metadata));
+    } else {
+        await addFileToIndex(context, markerId, metadata);
+    }
+    return new Response(null, { status: 201 });
 }
