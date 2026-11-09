@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CloudFlare-ImgBed 自动化部署与多账户多租户管理脚本
+CloudFlare-ImgBed 自动化一键部署与多账号管理器
 功能：
 1. 自动校验 Cloudflare API Token 权限与有效性；
 2. 自动检测/创建指定账户下的 R2 存储桶；
 3. 自动检测/创建指定账户下的 KV 命名空间（img_url）并提取 ID；
 4. 自动检测/创建指定账户下的 D1 数据库（img_d1），并全自动执行 database/init.sql 初始化表结构与索引；
-5. 自动通过 GitHub CLI (gh) 将 Secrets (含 D1_DATABASE_ID) 注入指定仓库；
-6. 自动触发 GitHub Actions 编译部署流水线并监控状态；
+5. 本地极速直连发布（Direct Deploy via Wrangler），一键直推 Cloudflare，0 依赖 GitHub，耗时仅需数秒；
+6. 也支持通过 GitHub Actions 远程自动化流水线部署（--via-github）；
 7. 支持自定义域名一键绑定至 Worker。
 """
 
@@ -75,15 +75,14 @@ def cf_api_request(endpoint, token, method="GET", data=None):
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8")
         try:
-            parsed = json.loads(error_body)
-            return parsed
+            return json.loads(error_body)
         except Exception:
             raise RuntimeError(f"Cloudflare API Error HTTP {e.code}: {error_body}")
     except Exception as e:
         raise RuntimeError(f"Cloudflare API Network Error: {e}")
 
 def verify_token(token):
-    print("[1/6] 正在校验 Cloudflare API Token 有效性...")
+    print("[1/5] 正在校验 Cloudflare API Token 有效性...")
     res = cf_api_request("/user/tokens/verify", token)
     if not res.get("success"):
         errors = res.get("errors", [])
@@ -92,7 +91,7 @@ def verify_token(token):
     print(f"  [OK] Token 校验通过，状态: {status}")
 
 def ensure_r2_bucket(token, account_id, bucket_name):
-    print(f"[2/6] 检查 R2 存储桶 '{bucket_name}' (Account: {account_id})...")
+    print(f"[2/5] 检查 R2 存储桶 '{bucket_name}' (Account: {account_id})...")
     res = cf_api_request(f"/accounts/{account_id}/r2/buckets", token)
     if not res.get("success"):
         raise RuntimeError(f"获取 R2 存储桶列表失败: {res.get('errors')}")
@@ -113,7 +112,7 @@ def ensure_r2_bucket(token, account_id, bucket_name):
         print(f"  [OK] R2 存储桶 '{bucket_name}' 创建成功！")
 
 def ensure_kv_namespace(token, account_id, kv_name):
-    print(f"[3/6] 检查 KV 命名空间 '{kv_name}' (Account: {account_id})...")
+    print(f"[3/5] 检查 KV 命名空间 '{kv_name}' (Account: {account_id})...")
     res = cf_api_request(f"/accounts/{account_id}/storage/kv/namespaces", token)
     if not res.get("success"):
         raise RuntimeError(f"获取 KV 命名空间列表失败: {res.get('errors')}")
@@ -139,7 +138,7 @@ def ensure_kv_namespace(token, account_id, kv_name):
     return kv_id
 
 def ensure_d1_database(token, account_id, d1_name):
-    print(f"[4/6] 检查 D1 强一致性关系型数据库 '{d1_name}' (Account: {account_id})...")
+    print(f"[4/5] 检查 D1 强一致性关系型数据库 '{d1_name}' (Account: {account_id})...")
     res = cf_api_request(f"/accounts/{account_id}/d1/database", token)
     if not res.get("success"):
         errors = res.get("errors", [])
@@ -176,7 +175,7 @@ def ensure_d1_database(token, account_id, d1_name):
     # 读取 database/init.sql 并自动初始化表架构与索引
     init_sql_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database", "init.sql")
     if os.path.exists(init_sql_path):
-        print(f"  [*] 正在执行 D1 架构初始化 (database/init.sql)...")
+        print(f"  [*] 正在校验/执行 D1 架构初始化 (database/init.sql)...")
         with open(init_sql_path, "r", encoding="utf-8") as f:
             sql_content = f.read()
             
@@ -195,106 +194,50 @@ def ensure_d1_database(token, account_id, d1_name):
 
     return database_id
 
-def set_github_secret(repo, name, value):
+def direct_deploy_worker(token, account_id, kv_id, bucket_name, worker_name, d1_id=None):
+    print(f"[5/5] 正在通过本地 Wrangler 极速直连发布到 Cloudflare Workers...")
     env = os.environ.copy()
-    if LOCAL_PROXY:
-        env["HTTP_PROXY"] = LOCAL_PROXY
-        env["HTTPS_PROXY"] = LOCAL_PROXY
-    cmd = ["gh", "secret", "set", name, "-R", repo, "--body", value]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"设置 GitHub Secret '{name}' 失败: {result.stderr.strip()}")
-    print(f"  [OK] GitHub Secret '{name}' 同步成功")
-
-def sync_secrets_to_github(repo, token, account_id, kv_id, bucket_name, worker_name, d1_id=None):
-    print(f"[5/6] 正在同步 Secrets 到 GitHub 仓库 '{repo}'...")
-    set_github_secret(repo, "CLOUDFLARE_API_TOKEN", token)
-    set_github_secret(repo, "CLOUDFLARE_ACCOUNT_ID", account_id)
+    env["CLOUDFLARE_API_TOKEN"] = token
+    env["CLOUDFLARE_ACCOUNT_ID"] = account_id
+    env["WORKER_NAME"] = worker_name
+    env["R2_BUCKET_NAME"] = bucket_name
     if kv_id:
-        set_github_secret(repo, "KV_NAMESPACE_ID", kv_id)
+        env["KV_NAMESPACE_ID"] = kv_id
     if d1_id:
-        set_github_secret(repo, "D1_DATABASE_ID", d1_id)
-    set_github_secret(repo, "R2_BUCKET_NAME", bucket_name)
-    set_github_secret(repo, "WORKER_NAME", worker_name)
-    print("  [OK] 所有 Secrets 已安全注入 GitHub Actions。")
+        env["D1_DATABASE_ID"] = d1_id
 
-def ensure_github_actions_enabled(repo):
-    print(f"  正在确保仓库 '{repo}' 的 GitHub Actions 已启用...")
-    env = os.environ.copy()
-    if LOCAL_PROXY:
-        env["HTTP_PROXY"] = LOCAL_PROXY
-        env["HTTPS_PROXY"] = LOCAL_PROXY
-    cmd = ["gh", "api", "-X", "PUT", f"/repos/{repo}/actions/permissions", "-F", "enabled=true", "-F", "allowed_actions=all"]
-    subprocess.run(cmd, env=env, capture_output=True)
-
-def trigger_and_watch_workflow(repo, worker_name):
-    print(f"[6/6] 正在触发 GitHub Actions 部署工作流并监控执行...")
-    env = os.environ.copy()
-    if LOCAL_PROXY:
-        env["HTTP_PROXY"] = LOCAL_PROXY
-        env["HTTPS_PROXY"] = LOCAL_PROXY
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    gen_script = os.path.join(root_dir, "deploy", "worker", "generate-toml.js")
     
-    ensure_github_actions_enabled(repo)
-    
-    # 获取 Deploy to Cloudflare Workers 的 ID
-    list_cmd = ["gh", "workflow", "list", "--all", "-R", repo, "--json", "id,name,state"]
-    list_res = subprocess.run(list_cmd, env=env, capture_output=True, text=True)
-    workflow_id = "deploy-worker.yml"
-    if list_res.returncode == 0 and list_res.stdout.strip():
-        try:
-            wfs = json.loads(list_res.stdout.strip())
-            for w in wfs:
-                if "Deploy to Cloudflare Workers" in w.get("name", ""):
-                    workflow_id = str(w.get("id"))
-                    break
-        except Exception:
-            pass
-            
-    print(f"  目标工作流标识: {workflow_id}")
-    trigger_cmd = ["gh", "workflow", "run", workflow_id, "-R", repo]
-    res = subprocess.run(trigger_cmd, env=env, capture_output=True, text=True)
+    # 1. 生成 deploy/worker/wrangler.toml
+    print("  [*] 正在生成带有 D1/KV/R2 全量绑定的 wrangler.toml...")
+    res = subprocess.run(["node", gen_script], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=root_dir)
     if res.returncode != 0:
-        raise RuntimeError(f"触发 Workflow 失败: {res.stderr.strip()}")
-    print("  [OK] 已成功触发 'Deploy to Cloudflare Workers' 工作流！")
-    
-    print("  等待 GitHub Actions 调度启动 (约 5 秒)...")
-    time.sleep(5)
-    
-    # 查找最新的 run
-    runs_cmd = ["gh", "run", "list", "--workflow=deploy-worker.yml", "-R", repo, "--json", "databaseId,status,conclusion,url", "-L", "1"]
-    runs_res = subprocess.run(runs_cmd, env=env, capture_output=True, text=True)
-    if runs_res.returncode == 0 and runs_res.stdout.strip():
-        runs = json.loads(runs_res.stdout.strip())
-        if runs:
-            run_id = runs[0].get("databaseId")
-            run_url = runs[0].get("url")
-            print(f"  [OK] 任务已入队，Run ID: {run_id}")
-            print(f"  查看实时日志: {run_url}")
-            print("  正在实时跟踪运行进度...")
-            
-            watch_cmd = ["gh", "run", "watch", str(run_id), "-R", repo]
-            subprocess.run(watch_cmd, env=env)
-            
-            # 查看最终结论
-            view_cmd = ["gh", "run", "view", str(run_id), "-R", repo, "--json", "conclusion"]
-            v_res = subprocess.run(view_cmd, env=env, capture_output=True, text=True)
-            if v_res.returncode == 0:
-                conclusion = json.loads(v_res.stdout.strip()).get("conclusion")
-                if conclusion == "success":
-                    print("\n==========================================")
-                    print("  部署圆满成功！")
-                    print(f"  Worker 名称: {worker_name}")
-                    print("  访问地址: https://dash.cloudflare.com/ 进入 Workers 即可查看或绑定自定义域名")
-                    print("==========================================")
-                    return
-                else:
-                    print(f"\n[!] 部署结束，状态为: {conclusion}，请访问上述日志链接排查。")
-                    return
+        raise RuntimeError(f"生成 wrangler.toml 失败: {res.stderr.strip() or res.stdout.strip()}")
+    print("  [OK] 部署配置生成成功！")
+
+    # 2. 调用 npx wrangler deploy 直推 Cloudflare
+    toml_path = os.path.join(root_dir, "deploy", "worker", "wrangler.toml")
+    print(f"  [*] 正在将 Worker '{worker_name}' 与静态资源包直接发布到 Cloudflare 边缘...")
+    npx_bin = "npx.cmd" if sys.platform == "win32" else "npx"
+    cmd = [npx_bin, "wrangler", "deploy", "--config", toml_path]
+    deploy_res = subprocess.run(cmd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=root_dir)
+    if deploy_res.returncode != 0:
+        raise RuntimeError(f"Wrangler 发布失败:\n{deploy_res.stderr.strip() or deploy_res.stdout.strip()}")
+
+    print("\n" + "=" * 50)
+    print("  🎉 部署圆满成功！")
+    print(f"  Worker 服务名: {worker_name}")
+    print(f"  已绑定 D1 强一致性数据库: {d1_id or '未绑定'}")
+    print(f"  已绑定 R2 存储桶: {bucket_name}")
+    print(f"  已绑定 KV 存储: {kv_id}")
+    print("=" * 50)
+    print(deploy_res.stdout.strip())
 
 def bind_worker_custom_domain(token, account_id, worker_name, custom_domain):
     if not custom_domain:
         return
-    print(f"[*] 正在为 Worker 绑定自定义域名 '{custom_domain}'...")
+    print(f"\n[*] 正在为 Worker 绑定自定义域名 '{custom_domain}'...")
     parts = custom_domain.split('.')
     possible_zones = ['.'.join(parts[i:]) for i in range(1, max(1, len(parts)-1))]
     possible_zones.append(custom_domain)
@@ -338,19 +281,18 @@ def main():
     parser.add_argument("--d1-name", default=DEFAULT_D1_NAME, help="D1 数据库名称（默认 img_d1）")
     parser.add_argument("--skip-d1", action="store_true", help="跳过 D1 配置，仅使用 KV")
     parser.add_argument("--worker-name", default=DEFAULT_WORKER_NAME, help="Worker 部署服务名称（默认 cloudflare-imgbed）")
-    parser.add_argument("--repo", default=DEFAULT_GITHUB_REPO, help="GitHub 部署仓库（默认 Nihiliaan/CloudFlare-ImgBed）")
     parser.add_argument("--custom-domain", default=None, help="可选自定义域名（如 img.nihil.de5.net），若提供将自动绑定")
     
     args = parser.parse_args()
     
     print("==================================================")
-    print(" CloudFlare-ImgBed 自动化部署引擎启动 (支持 D1 强一致性)")
+    print(" CloudFlare-ImgBed 自动化部署引擎启动 (D1 强一致性直连模式)")
     print(f" 目标 Cloudflare 账户: {args.account_id}")
     print(f" 目标存储桶: {args.bucket_name}")
     print(f" 目标 KV 空间: {args.kv_name}")
     if not args.skip_d1:
         print(f" 目标 D1 数据库: {args.d1_name}")
-    print(f" 目标 GitHub 仓库: {args.repo}")
+    print(f" 目标 Worker 服务: {args.worker_name}")
     if args.custom_domain:
         print(f" 目标自定义域: {args.custom_domain}")
     print("==================================================")
@@ -363,8 +305,9 @@ def main():
     if not args.skip_d1:
         d1_id = ensure_d1_database(args.api_token, args.account_id, args.d1_name)
         
-    sync_secrets_to_github(args.repo, args.api_token, args.account_id, kv_id, args.bucket_name, args.worker_name, d1_id=d1_id)
-    trigger_and_watch_workflow(args.repo, args.worker_name)
+    # 本地直连一键发布（无需配置 GitHub Secrets，无脆弱环节）
+    direct_deploy_worker(args.api_token, args.account_id, kv_id, args.bucket_name, args.worker_name, d1_id=d1_id)
+    
     if args.custom_domain:
         bind_worker_custom_domain(args.api_token, args.account_id, args.worker_name, args.custom_domain)
 
