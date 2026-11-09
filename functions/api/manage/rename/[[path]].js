@@ -192,7 +192,7 @@ export async function onRequest(context) {
         await purgePublicFileListCache(url.origin, normalizedFolder, normalizedDist);
 
         // 更新索引
-        waitUntil(moveFileInIndex(context, fileId, newFileId));
+        await moveFileInIndex(context, fileId, newFileId);
 
         return new Response(JSON.stringify({
             success: true,
