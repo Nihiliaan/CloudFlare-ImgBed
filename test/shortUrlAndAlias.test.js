@@ -138,4 +138,55 @@ describe('short URL and move redirect (Issue #763)', () => {
         // Alias should be cached
         assert.equal(await fixture.db.get(`manage@alias@${shortId}.png`), shortId);
     });
+
+    it('migrates legacy long-path files to pure short IDs while preserving redirects and directories', async () => {
+        const migrateHandler = await loadFunction('functions/api/manage/migrateShortId.js', fixture.mocks);
+        const legacyId = 'Token/1794155155143_sample.webp';
+        const metadata = {
+            Channel: 'CloudflareR2',
+            FileName: 'sample.webp',
+            FileType: 'image/webp',
+            Directory: 'Token/'
+        };
+        await fixture.seed([{ id: legacyId, metadata }]);
+        fixture.objects.set(legacyId, 'sample-webp-bytes');
+
+        const ctx = createContext('https://test/api/manage/migrateShortId', {
+            method: 'POST', env: fixture.env
+        });
+        const res = await migrateHandler.onRequest(ctx);
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.success, true);
+        assert.equal(body.migratedCount, 1);
+
+        const newId = body.migrated[0].newId;
+        assert.match(newId, /^[a-zA-Z0-9]{8}$/);
+
+        // Verify old key deleted and redirect pointer set
+        assert.equal(await fixture.db.getWithMetadata(legacyId), null);
+        assert.equal(await fixture.db.get('manage@redirect@' + legacyId), newId);
+
+        // Verify new key exists in DB with preserved Directory and FileName
+        const newRecord = await fixture.db.getWithMetadata(newId);
+        assert.ok(newRecord);
+        assert.equal(newRecord.metadata.FileName, 'sample.webp');
+        assert.equal(newRecord.metadata.Directory, 'Token/');
+        assert.equal(newRecord.metadata.FileType, 'image/webp');
+
+        // Verify old URL still serves transparently via redirect pointer
+        const oldUrlCtx = createContext(`https://test/file/${legacyId}`, {
+            params: { path: legacyId.replace('/', ',') }, env: fixture.env
+        });
+        const oldServeRes = await route.onRequest(oldUrlCtx);
+        assert.equal(oldServeRes.status, 200);
+
+        // Verify new short URL serves directly
+        const newUrlCtx = createContext(`https://test/file/${newId}`, {
+            params: { path: newId }, env: fixture.env
+        });
+        const newServeRes = await route.onRequest(newUrlCtx);
+        assert.equal(newServeRes.status, 200);
+        assert.equal(newServeRes.headers.get('Content-Type'), 'image/webp');
+    });
 });

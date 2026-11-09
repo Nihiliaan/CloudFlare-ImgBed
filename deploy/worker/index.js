@@ -49,6 +49,7 @@ import * as apiBingWallpaper_index from '../../functions/api/bing/wallpaper/inde
 import * as apiManageApiTokens from '../../functions/api/manage/apiTokens.js';
 import * as apiManageExpiry from '../../functions/api/manage/expiry.js';
 import * as apiManageList from '../../functions/api/manage/list.js';
+import * as apiManageMigrateShortId from '../../functions/api/manage/migrateShortId.js';
 import * as apiManageQuota from '../../functions/api/manage/quota.js';
 import * as apiPublicList from '../../functions/api/public/list.js';
 import * as uploadHuggingfaceCommitUpload from '../../functions/upload/huggingface/commitUpload.js';
@@ -62,9 +63,11 @@ import * as random_index from '../../functions/random/index.js';
 import * as upload_index from '../../functions/upload/index.js';
 import * as apiManageBlockCatchAll from '../../functions/api/manage/block/[[path]].js';
 import * as apiManageDeleteCatchAll from '../../functions/api/manage/delete/[[path]].js';
+import * as apiManageFolderCatchAll from '../../functions/api/manage/folder/[[path]].js';
 import * as apiManageMetadataCatchAll from '../../functions/api/manage/metadata/[[path]].js';
 import * as apiManageMoveCatchAll from '../../functions/api/manage/move/[[path]].js';
 import * as apiManageRenameCatchAll from '../../functions/api/manage/rename/[[path]].js';
+import * as apiManageReplaceCatchAll from '../../functions/api/manage/replace/[[path]].js';
 import * as apiManageTagsCatchAll from '../../functions/api/manage/tags/[[path]].js';
 import * as apiManageWhiteCatchAll from '../../functions/api/manage/white/[[path]].js';
 import * as davCatchAll from '../../functions/dav/[[path]].js';
@@ -109,6 +112,7 @@ const routes = [
     { path: '/api/manage/apiTokens', module: apiManageApiTokens, middlewares: [mw_root, mw_api, mw_api_manage] },
     { path: '/api/manage/expiry', module: apiManageExpiry, middlewares: [mw_root, mw_api, mw_api_manage] },
     { path: '/api/manage/list', module: apiManageList, middlewares: [mw_root, mw_api, mw_api_manage] },
+    { path: '/api/manage/migrateShortId', module: apiManageMigrateShortId, middlewares: [mw_root, mw_api, mw_api_manage] },
     { path: '/api/manage/quota', module: apiManageQuota, middlewares: [mw_root, mw_api, mw_api_manage] },
     { path: '/api/public/list', module: apiPublicList, middlewares: [mw_root, mw_api] },
     { path: '/upload/huggingface/commitUpload', module: uploadHuggingfaceCommitUpload, middlewares: [mw_root, mw_upload] },
@@ -122,9 +126,11 @@ const routes = [
     { path: '/upload', module: upload_index, middlewares: [mw_root, mw_upload] },
     { path: '/api/manage/block/', module: apiManageBlockCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/delete/', module: apiManageDeleteCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
+    { path: '/api/manage/folder/', module: apiManageFolderCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/metadata/', module: apiManageMetadataCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/move/', module: apiManageMoveCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/rename/', module: apiManageRenameCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
+    { path: '/api/manage/replace/', module: apiManageReplaceCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/tags/', module: apiManageTagsCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/api/manage/white/', module: apiManageWhiteCatchAll, middlewares: [mw_root, mw_api, mw_api_manage], catchAll: true },
     { path: '/dav/', module: davCatchAll, middlewares: [mw_root, mw_dav], catchAll: true },

@@ -17,4 +17,7 @@ _backup/
 cache/
 
 deploy_config.json
+__pycache__/
+*.pyc
+
 

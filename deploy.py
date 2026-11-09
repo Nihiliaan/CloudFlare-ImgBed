@@ -208,7 +208,14 @@ def direct_deploy_worker(token, account_id, kv_id, bucket_name, worker_name, d1_
 
     root_dir = os.path.dirname(os.path.abspath(__file__))
     gen_script = os.path.join(root_dir, "deploy", "worker", "generate-toml.js")
-    
+    routes_script = os.path.join(root_dir, "deploy", "worker", "generate-routes.js")
+
+    # 0. 扫描并生成 deploy/worker/index.js 路由适配层
+    print("  [*] 正在扫描 functions/ 路由并生成 Worker 适配层...")
+    routes_res = subprocess.run(["node", routes_script], cwd=root_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if routes_res.returncode != 0:
+        raise RuntimeError(f"生成 Worker 路由失败: {routes_res.stderr.strip() or routes_res.stdout.strip()}")
+
     # 1. 生成 deploy/worker/wrangler.toml
     print("  [*] 正在生成带有 D1/KV/R2 全量绑定的 wrangler.toml...")
     res = subprocess.run(["node", gen_script], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=root_dir)
