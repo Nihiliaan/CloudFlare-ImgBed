@@ -756,6 +756,33 @@ export async function readIndex(context, options = {}) {
  * @param {Object} context - 上下文对象
  * @param {Function} progressCallback - 进度回调函数
  */
+/**
+ * 辅助推断文件的 MIME 类型
+ */
+function guessMimeType(fileName) {
+    const extMatch = fileName.match(/\.([a-zA-Z0-9]+)$/);
+    const ext = extMatch ? extMatch[1].toLowerCase() : '';
+    const map = {
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        svg: 'image/svg+xml',
+        bmp: 'image/bmp',
+        ico: 'image/x-icon',
+        avif: 'image/avif',
+        mp4: 'video/mp4',
+        webm: 'video/webm',
+        mp3: 'audio/mpeg',
+        wav: 'audio/wav',
+        pdf: 'application/pdf',
+        zip: 'application/zip',
+        txt: 'text/plain'
+    };
+    return map[ext] || 'application/octet-stream';
+}
+
 export async function rebuildIndex(context, progressCallback = null) {
     const { env, waitUntil } = context;
     const db = getDatabase(env);
@@ -763,8 +790,8 @@ export async function rebuildIndex(context, progressCallback = null) {
     try {
         console.log('Starting index rebuild...');
         
-        let cursor = null;
         let processedCount = 0;
+        const processedKeys = new Set();
         const newIndex = {
             files: [],
             lastUpdated: Date.now(),
@@ -772,7 +799,101 @@ export async function rebuildIndex(context, progressCallback = null) {
             lastOperationId: null
         };
 
-        // 分批读取所有文件
+        const hasR2 = !!(env && env.img_r2 && typeof env.img_r2.list === 'function');
+
+        // 1. 若配置了 R2 物理存储桶，优先扫描物理对象进行真实对账与元数据补全
+        if (hasR2) {
+            console.log('Scanning R2 bucket for physical files...');
+            let r2Cursor = undefined;
+            do {
+                const listRes = await env.img_r2.list({
+                    limit: 1000,
+                    cursor: r2Cursor
+                });
+
+                const objects = listRes.objects || [];
+                for (const obj of objects) {
+                    const key = obj.key;
+                    // 跳过管理键、分块内部标记、系统占位与目录标记
+                    if (!key || key.startsWith('manage@') || key.startsWith('chunk_') || key === '.keep' || key.endsWith('/.keep') || key.endsWith('/')) {
+                        continue;
+                    }
+
+                    // 查询数据库中是否已有该文件的元数据记录
+                    let metadata = null;
+                    try {
+                        const existing = await db.getWithMetadata(key);
+                        if (existing && existing.metadata && existing.metadata.TimeStamp) {
+                            metadata = { ...existing.metadata };
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to read existing metadata for ${key}:`, e);
+                    }
+
+                    const lastSlash = key.lastIndexOf('/');
+                    const defaultFileName = lastSlash !== -1 ? key.substring(lastSlash + 1) : key;
+                    const directory = lastSlash !== -1 ? key.substring(0, lastSlash + 1) : '';
+                    const uploadTime = obj.uploaded ? new Date(obj.uploaded).getTime() : Date.now();
+                    const sizeBytes = typeof obj.size === 'number' ? obj.size : 0;
+                    const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+
+                    if (metadata) {
+                        // 校验并补充物理属性
+                        metadata.FileSizeBytes = sizeBytes;
+                        if (!metadata.FileSize) {
+                            metadata.FileSize = sizeMB;
+                        }
+                        if (!metadata.Channel) {
+                            metadata.Channel = 'CloudflareR2';
+                        }
+                        if (!metadata.ChannelName) {
+                            metadata.ChannelName = 'CloudflareR2';
+                        }
+                    } else {
+                        // 数据库中缺失元数据，从物理对象属性自动推断并回写数据库
+                        const inferredType = obj.httpMetadata?.contentType || guessMimeType(defaultFileName);
+                        metadata = {
+                            FileName: defaultFileName,
+                            FileType: inferredType,
+                            FileSize: sizeMB,
+                            FileSizeBytes: sizeBytes,
+                            UploadIP: '127.0.0.1',
+                            UploadAddress: 'R2 Reconcile',
+                            ListType: 'None',
+                            TimeStamp: uploadTime,
+                            Label: 'None',
+                            Directory: directory,
+                            Channel: 'CloudflareR2',
+                            ChannelName: 'CloudflareR2',
+                            Tags: []
+                        };
+
+                        try {
+                            await db.put(key, '', { metadata });
+                        } catch (err) {
+                            console.warn(`Failed to persist reconciled metadata for ${key}:`, err);
+                        }
+                    }
+
+                    newIndex.files.push({
+                        id: key,
+                        metadata
+                    });
+                    processedKeys.add(key);
+                    processedCount++;
+
+                    if (progressCallback && processedCount % 100 === 0) {
+                        progressCallback(processedCount);
+                    }
+                }
+
+                r2Cursor = listRes.truncated ? listRes.cursor : undefined;
+            } while (r2Cursor);
+            console.log(`R2 scan completed. Found ${processedKeys.size} physical files.`);
+        }
+
+        // 2. 扫描数据库中的其余文件（保留非 R2 渠道文件或在无 R2 模式下平滑回退）
+        let cursor = null;
         while (true) {
             const response = await db.list({
                 limit: KV_LIST_LIMIT,
@@ -787,8 +908,18 @@ export async function rebuildIndex(context, progressCallback = null) {
                     continue;
                 }
 
+                // 已在 R2 物理扫描阶段收录，跳过
+                if (processedKeys.has(item.name)) {
+                    continue;
+                }
+
                 // 跳过没有元数据的文件
                 if (!item.metadata || !item.metadata.TimeStamp) {
+                    continue;
+                }
+
+                // 若配置了 R2，但记录标明为 CloudflareR2 且 R2 存储桶中无此文件，视为物理已删的幽灵记录跳过
+                if (hasR2 && (item.metadata.Channel === 'CloudflareR2' || (!item.metadata.Channel && !item.metadata.TgFileId))) {
                     continue;
                 }
 
@@ -799,6 +930,7 @@ export async function rebuildIndex(context, progressCallback = null) {
                 };
 
                 newIndex.files.push(fileItem);
+                processedKeys.add(item.name);
                 processedCount++;
 
                 // 报告进度
@@ -829,9 +961,15 @@ export async function rebuildIndex(context, progressCallback = null) {
         }
 
         // 清除旧的操作记录和多余索引
-        waitUntil(deleteAllOperations(context));
-        waitUntil(clearChunkedIndex(context, true));
-
+        const opsClean = deleteAllOperations(context);
+        const chunkClean = clearChunkedIndex(context, true);
+        if (typeof waitUntil === 'function') {
+            waitUntil(opsClean);
+            waitUntil(chunkClean);
+        } else {
+            await opsClean;
+            await chunkClean;
+        }
 
         console.log(`Index rebuild completed. Processed ${processedCount} files, indexed ${newIndex.totalCount} files.`);
         return {
