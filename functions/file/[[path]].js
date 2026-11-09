@@ -1210,13 +1210,28 @@ export async function resolveFileAlias(context, db, fileId) {
         }
     } catch (e) {}
 
+    // 2.5 检查是否为带后缀访问无后缀纯短 ID（例如外部请求 /file/xK9bQ2wz.png，而库中真实 ID 为 xK9bQ2wz）
+    const lastDot = baseName.lastIndexOf('.');
+    if (lastDot > 0) {
+        const idWithoutExt = baseName.substring(0, lastDot);
+        try {
+            const directMatch = await db.getWithMetadata(idWithoutExt);
+            if (directMatch && directMatch.metadata) {
+                try {
+                    await db.put('manage@alias@' + baseName, idWithoutExt);
+                } catch (e) {}
+                return idWithoutExt;
+            }
+        } catch (e) {}
+    }
+
     // 3. 检查 D1 数据库（若配置）
     if (context.env?.img_d1 && typeof context.env.img_d1.prepare === 'function') {
         try {
             const stmt = context.env.img_d1.prepare(
-                'SELECT id FROM files WHERE id = ? OR id LIKE ? LIMIT 1'
+                'SELECT id FROM files WHERE id = ? OR id LIKE ? OR id LIKE ? LIMIT 1'
             );
-            const row = await stmt.bind(baseName, '%/' + baseName).first();
+            const row = await stmt.bind(baseName, '%/' + baseName, baseName + '.%').first();
             if (row && row.id) {
                 try {
                     await db.put('manage@alias@' + baseName, row.id);
@@ -1231,7 +1246,16 @@ export async function resolveFileAlias(context, db, fileId) {
         if (typeof readIndex === 'function') {
             const indexResult = await readIndex(context, { count: -1, includeSubdirFiles: true });
             if (indexResult && Array.isArray(indexResult.files)) {
-                const matched = indexResult.files.find(f => f.id === baseName || f.id.endsWith('/' + baseName) || f.name === baseName || (typeof f.name === 'string' && f.name.endsWith('/' + baseName)));
+                const matched = indexResult.files.find(f => {
+                    const id = f.id || f.name;
+                    if (!id || typeof id !== 'string') return false;
+                    const fBase = id.split('/').pop();
+                    return id === baseName ||
+                           id.endsWith('/' + baseName) ||
+                           fBase === baseName ||
+                           (lastDot > 0 && fBase === baseName.substring(0, lastDot)) ||
+                           (fBase.startsWith(baseName + '.'));
+                });
                 if (matched) {
                     const targetId = matched.id || matched.name;
                     try {

@@ -454,20 +454,33 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     const unique_index = Date.now() + Math.floor(Math.random() * 10000);
     let baseId = '';
 
-    // 根据命名方式构建基础ID
-    if (nameType === 'index') {
+    // 纯短 ID 模式（默认及 short）：生成 8 位纯短 ID，不带路径、不带原文件名、不带后缀
+    if (nameType === 'short' || nameType === 'default') {
+        let attempts = 0;
+        while (attempts < 100) {
+            const shortId = generateShortId(8);
+            if (await db.get(shortId) === null) {
+                return shortId;
+            }
+            attempts++;
+        }
+        return generateShortId(10);
+    } else if (nameType === 'short_ext') {
+        // 短 ID 但保留后缀模式
+        let attempts = 0;
+        while (attempts < 100) {
+            const shortId = generateShortId(8);
+            const testId = `${shortId}.${fileExt}`;
+            if (await db.get(testId) === null) {
+                return testId;
+            }
+            attempts++;
+        }
+        return `${generateShortId(10)}.${fileExt}`;
+    } else if (nameType === 'index') {
         baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}.${fileExt}` : `${unique_index}.${fileExt}`;
     } else if (nameType === 'origin') {
         baseId = normalizedFolder ? `${normalizedFolder}/${fileName}` : fileName;
-    } else if (nameType === 'short') {
-        // 对于短链接，直接在循环中生成不重复的ID
-        while (true) {
-            const shortId = generateShortId(8);
-            const testFullId = normalizedFolder ? `${normalizedFolder}/${shortId}.${fileExt}` : `${shortId}.${fileExt}`;
-            if (await db.get(testFullId) === null) {
-                return testFullId;
-            }
-        }
     } else {
         baseId = normalizedFolder ? `${normalizedFolder}/${unique_index}_${fileName}` : `${unique_index}_${fileName}`;
     }

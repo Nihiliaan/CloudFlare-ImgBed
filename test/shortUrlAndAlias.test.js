@@ -95,4 +95,47 @@ describe('short URL and move redirect (Issue #763)', () => {
         // Verify alias was automatically cached
         assert.equal(await fixture.db.get('manage@alias@doc.png'), 'secret/vault/doc.png');
     });
+
+    it('resolves extensionless short ID directly with correct MIME', async () => {
+        // Seed a file stored under a pure short ID (no extension, no directory)
+        const shortId = 'aB3dE8zK';
+        const metadata = {
+            Channel: 'CloudflareR2',
+            FileName: 'myphoto.png',
+            FileType: 'image/png',
+            Directory: '2026/03/'
+        };
+        await fixture.seed([{ id: shortId, metadata }]);
+
+        const ctx = createContext(`https://test/file/${shortId}`, {
+            params: { path: shortId }, env: fixture.env
+        });
+        const res = await route.onRequest(ctx);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('Content-Type'), 'image/png');
+        assert.equal(await res.text(), 'file-content');
+    });
+
+    it('transparently resolves short ID when requested with extension (e.g. /file/aB3dE8zK.png)', async () => {
+        // Seed a pure short ID
+        const shortId = 'xK9bQ2wz';
+        const metadata = {
+            Channel: 'CloudflareR2',
+            FileName: 'sample.png',
+            FileType: 'image/png',
+            Directory: ''
+        };
+        await fixture.seed([{ id: shortId, metadata }]);
+
+        // Request with extension appended by external client
+        const ctx = createContext(`https://test/file/${shortId}.png`, {
+            params: { path: `${shortId}.png` }, env: fixture.env
+        });
+        const res = await route.onRequest(ctx);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('Content-Type'), 'image/png');
+        assert.equal(await res.text(), 'file-content');
+        // Alias should be cached
+        assert.equal(await fixture.db.get(`manage@alias@${shortId}.png`), shortId);
+    });
 });
