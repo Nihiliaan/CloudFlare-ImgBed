@@ -13,12 +13,12 @@ import { getExpiresAt, buildExpiryMarkerKey } from './fileExpiryHelpers.js';
  */
 export function createDatabaseAdapter(env) {
     // 检查是否配置了数据库
-    if (env.img_url && typeof env.img_url.get === 'function') {
-        // 使用KV存储
-        return new KVAdapter(env.img_url);
-    } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
-        // 使用D1数据库
+    if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
+        // 优先使用强一致性 D1 数据库
         return new D1Database(env.img_d1);
+    } else if (env.img_url && typeof env.img_url.get === 'function') {
+        // 降级使用 KV 存储
+        return new KVAdapter(env.img_url);
     } else {
         console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
         return null;

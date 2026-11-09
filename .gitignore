@@ -15,3 +15,6 @@ node_modules
 _backup/
 .temp/
 cache/
+
+deploy_config.json
+
